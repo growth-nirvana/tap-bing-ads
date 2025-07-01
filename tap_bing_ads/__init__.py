@@ -182,11 +182,70 @@ def get_authentication():
         return authentication
 
 @bing_ads_error_handling
+def list_accessible_accounts():
+    """Return a list of accounts the current OAuth token can access."""
+    authentication = get_authentication()
+    authorization_data = AuthorizationData(
+        developer_token=CONFIG['developer_token'],
+        authentication=authentication,
+    )
+    client = CustomServiceClient('CustomerManagementService',
+                                 authorization_data=authorization_data)
+
+    user = sobject_to_dict(client.GetUser(UserId=None))
+    user_id = user['Id']
+
+    accounts = []
+    page_index = 0
+    while True:
+        request = {
+            'Predicates': {
+                'Predicate': [{
+                    'Field': 'UserId',
+                    'Operator': 'Equals',
+                    'Value': user_id
+                }]
+            },
+            'PageInfo': {'Index': page_index, 'Size': 100},
+        }
+        response = sobject_to_dict(client.SearchAccounts(**request))
+        page_accounts = response.get('Accounts', {}).get('AdvertiserAccount', [])
+        if isinstance(page_accounts, dict):
+            page_accounts = [page_accounts]
+        accounts.extend(page_accounts)
+        if not page_accounts or len(page_accounts) < 100:
+            break
+        page_index += 1
+    return accounts
+
+@bing_ads_error_handling
 def get_customer_id_from_account_id(account_id):
     """Get the customer ID (parent account ID) from an account ID."""
-    client = CustomServiceClient('CustomerManagementService')
-    response = client.GetAccount(AccountId=account_id)
-    account_data = sobject_to_dict(response)
+    authentication = get_authentication()
+    authorization_data = AuthorizationData(
+        developer_token=CONFIG['developer_token'],
+        authentication=authentication,
+    )
+    client = CustomServiceClient('CustomerManagementService',
+                                 authorization_data=authorization_data)
+    request = {
+        'Predicates': {
+            'Predicate': [{
+                'Field': 'AccountId',
+                'Operator': 'Equals',
+                'Value': account_id
+            }]
+        },
+        'PageInfo': {'Index': 0, 'Size': 1},
+    }
+    response = sobject_to_dict(client.SearchAccounts(**request))
+    accounts = response.get('Accounts', {}).get('AdvertiserAccount')
+    if not accounts:
+        raise Exception(f'Account {account_id} not found or inaccessible')
+    if isinstance(accounts, list):
+        account_data = accounts[0]
+    else:
+        account_data = accounts
     return account_data['ParentCustomerId']
 
 @bing_ads_error_handling
@@ -611,8 +670,10 @@ def discover_reports():
 def test_credentials(account_ids):
     if not account_ids:
         raise Exception('At least one id in account_ids is required to test authentication')
-
-    create_sdk_client('CustomerManagementService', account_ids[0]) # Create bingads sdk client
+    accounts = list_accessible_accounts()
+    accessible_ids = {str(a['Id']) for a in accounts}
+    if str(account_ids[0]) not in accessible_ids:
+        raise Exception('Provided account_id is not accessible with current credentials')
 
 def do_discover(account_ids):
     # Discover schemas and dump in STDOUT
