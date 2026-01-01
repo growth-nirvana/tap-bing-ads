@@ -182,14 +182,6 @@ def get_authentication():
         return authentication
 
 @bing_ads_error_handling
-def get_customer_id_from_account_id(account_id):
-    """Get the customer ID (parent account ID) from an account ID."""
-    client = CustomServiceClient('CustomerManagementService')
-    response = client.GetAccount(AccountId=account_id)
-    account_data = sobject_to_dict(response)
-    return account_data['ParentCustomerId']
-
-@bing_ads_error_handling
 def create_sdk_client(service, account_id):
     # Creates SOAP client with OAuth refresh credentials for services
     LOGGER.info('Creating SOAP client with OAuth refresh credentials for service: %s, account_id %s',
@@ -197,11 +189,8 @@ def create_sdk_client(service, account_id):
 
     authentication = get_authentication()
 
-    # Get customer_id from account_id if not provided in config
-    customer_id = CONFIG.get('customer_id')
-    if not customer_id:
-        customer_id = get_customer_id_from_account_id(account_id)
-        CONFIG['customer_id'] = customer_id
+    # Get customer_id from config, or use account_id as customer_id
+    customer_id = CONFIG.get('customer_id', account_id)
 
     # Instance require to authenticate with Bing Ads
     authorization_data = AuthorizationData(
