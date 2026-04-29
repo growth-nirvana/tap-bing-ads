@@ -84,6 +84,20 @@ class BingAdsBaseTest(BaseCase):
         goals_report = copy.deepcopy(default_report)
         goals_report[BingAdsBaseTest.REQUIRED_KEYS] = {'Goal', 'TimePeriod'}
 
+        campaign_goals_report = copy.deepcopy(default_report)
+        campaign_goals_report[BingAdsBaseTest.REQUIRED_KEYS] = {
+            'AllConversions',
+            'AllConversionsQualified',
+            'Assists',
+            'CampaignId',
+            'CampaignName',
+            'CampaignType',
+            'Goal',
+            'GoalId',
+            'GoalType',
+            'TimePeriod'
+        }
+
         audience_report = copy.deepcopy(default_report)
         audience_report[BingAdsBaseTest.REQUIRED_KEYS] = {'AudienceId'}
 
@@ -118,6 +132,7 @@ class BingAdsBaseTest(BaseCase):
             "audience_performance_report": audience_report, # BUG_DOC-1504
             "campaign_performance_report": default_report,
             "campaigns": default,
+            "campaign_goals_and_funnels_report": campaign_goals_report,
             "geographic_performance_report": geographic_report,
             "goals_and_funnels_report": goals_report,
             "keyword_performance_report": default_report,

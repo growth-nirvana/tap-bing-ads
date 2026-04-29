@@ -30,6 +30,17 @@ REPORT_SPECIFIC_REQUIRED_FIELDS = {
         'AdExtensionTypeId' # removed `Impressions`, `Ctr,`, and `Clicks` from the required fields of `AdExtensionDetailReport`
     ],
     'GoalsAndFunnelsReport': ['Goal'],
+    'campaign_goals_and_funnels_report': [
+        'AllConversions',
+        'AllConversionsQualified',
+        'Assists',
+        'CampaignId',
+        'CampaignName',
+        'CampaignType',
+        'Goal',
+        'GoalId',
+        'GoalType',
+    ],
     # added required fields for `AgeGenderAudienceReport` as mentioned in the bing-ads docs
     'AgeGenderAudienceReport': [
         'AccountName',
@@ -45,6 +56,9 @@ REPORTING_FIELD_TYPES = {
     'AdId': 'integer',
     'AdGroupCriterionId': 'integer',
     'AdGroupId': 'integer',
+    'AllConversions': 'number',
+    'AllConversionsQualified': 'number',
+    'AllRevenue': 'number',
     'AdRelevance': 'number',
     'Assists': 'integer',
     'AverageCpc': 'number',

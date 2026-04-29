@@ -51,6 +51,10 @@ TOP_LEVEL_CORE_OBJECTS = [
     'Keyword'
 ]
 
+REPORT_STREAM_ALIASES = {
+    'campaign_goals_and_funnels_report': 'GoalsAndFunnelsReport',
+}
+
 CONFIG = {}
 STATE = {}
 
@@ -562,6 +566,14 @@ def get_report_metadata(report_name, report_schema):
         lambda field: metadata_fn(report_name, field, required_fields),
         report_schema['properties']))
 
+def get_report_name_for_stream(stream_name):
+    return REPORT_STREAM_ALIASES.get(stream_name, pascalcase(stream_name))
+
+def get_report_stream_names():
+    return {
+        snakecase(report_name) for report_name in reports.REPORT_WHITELIST
+    } | set(REPORT_STREAM_ALIASES)
+
 def snakecase(camelstring):
     """Takes a CamelCase string and returns a snake_case string"""
     if not camelstring:
@@ -594,6 +606,15 @@ def discover_reports():
                 report_schema,
                 stream_metadata=report_metadata)
             report_streams.append(report_stream_def)
+
+    for stream_name, report_name in REPORT_STREAM_ALIASES.items():
+        report_schema = get_report_schema(client, report_name)
+        report_metadata = get_report_metadata(stream_name, report_schema)
+        report_stream_def = get_stream_def(
+            stream_name,
+            report_schema,
+            stream_metadata=report_metadata)
+        report_streams.append(report_stream_def)
 
     return report_streams
 
@@ -965,7 +986,7 @@ async def sync_report(client, account_id, report_stream):
 async def sync_report_interval(client, account_id, report_stream,
                                start_date, end_date):
     state_key = '{}_{}'.format(account_id, report_stream.stream)
-    report_name = pascalcase(report_stream.stream)
+    report_name = get_report_name_for_stream(report_stream.stream)
 
     report_schema = get_report_schema(client, report_name)
     singer.write_schema(report_stream.stream, report_schema, [])
@@ -1108,9 +1129,7 @@ async def sync_account_data(account_id, catalog, selected_streams):
     all_core_streams = {
         snakecase(o) + 's' for o in TOP_LEVEL_CORE_OBJECTS
     }
-    all_report_streams = {
-        snakecase(r) for r in reports.REPORT_WHITELIST
-    }
+    all_report_streams = get_report_stream_names()
 
     if len(all_core_streams & set(selected_streams)):
         # Sync all core objects streams
