@@ -51,6 +51,10 @@ TOP_LEVEL_CORE_OBJECTS = [
     'Keyword'
 ]
 
+REPORT_STREAM_ALIASES = {
+    'campaign_goals_and_funnels_report': 'GoalsAndFunnelsReport',
+}
+
 CONFIG = {}
 STATE = {}
 
@@ -182,14 +186,6 @@ def get_authentication():
         return authentication
 
 @bing_ads_error_handling
-def get_customer_id_from_account_id(account_id):
-    """Get the customer ID (parent account ID) from an account ID."""
-    client = CustomServiceClient('CustomerManagementService')
-    response = client.GetAccount(AccountId=account_id)
-    account_data = sobject_to_dict(response)
-    return account_data['ParentCustomerId']
-
-@bing_ads_error_handling
 def create_sdk_client(service, account_id):
     # Creates SOAP client with OAuth refresh credentials for services
     LOGGER.info('Creating SOAP client with OAuth refresh credentials for service: %s, account_id %s',
@@ -197,11 +193,8 @@ def create_sdk_client(service, account_id):
 
     authentication = get_authentication()
 
-    # Get customer_id from account_id if not provided in config
-    customer_id = CONFIG.get('customer_id')
-    if not customer_id:
-        customer_id = get_customer_id_from_account_id(account_id)
-        CONFIG['customer_id'] = customer_id
+    # Get customer_id from config, or use account_id as customer_id
+    customer_id = CONFIG.get('customer_id', account_id)
 
     # Instance require to authenticate with Bing Ads
     authorization_data = AuthorizationData(
@@ -573,6 +566,14 @@ def get_report_metadata(report_name, report_schema):
         lambda field: metadata_fn(report_name, field, required_fields),
         report_schema['properties']))
 
+def get_report_name_for_stream(stream_name):
+    return REPORT_STREAM_ALIASES.get(stream_name, pascalcase(stream_name))
+
+def get_report_stream_names():
+    return {
+        snakecase(report_name) for report_name in reports.REPORT_WHITELIST
+    } | set(REPORT_STREAM_ALIASES)
+
 def snakecase(camelstring):
     """Takes a CamelCase string and returns a snake_case string"""
     if not camelstring:
@@ -605,6 +606,15 @@ def discover_reports():
                 report_schema,
                 stream_metadata=report_metadata)
             report_streams.append(report_stream_def)
+
+    for stream_name, report_name in REPORT_STREAM_ALIASES.items():
+        report_schema = get_report_schema(client, report_name)
+        report_metadata = get_report_metadata(stream_name, report_schema)
+        report_stream_def = get_stream_def(
+            stream_name,
+            report_schema,
+            stream_metadata=report_metadata)
+        report_streams.append(report_stream_def)
 
     return report_streams
 
@@ -976,7 +986,7 @@ async def sync_report(client, account_id, report_stream):
 async def sync_report_interval(client, account_id, report_stream,
                                start_date, end_date):
     state_key = '{}_{}'.format(account_id, report_stream.stream)
-    report_name = pascalcase(report_stream.stream)
+    report_name = get_report_name_for_stream(report_stream.stream)
 
     report_schema = get_report_schema(client, report_name)
     singer.write_schema(report_stream.stream, report_schema, [])
@@ -1119,9 +1129,7 @@ async def sync_account_data(account_id, catalog, selected_streams):
     all_core_streams = {
         snakecase(o) + 's' for o in TOP_LEVEL_CORE_OBJECTS
     }
-    all_report_streams = {
-        snakecase(r) for r in reports.REPORT_WHITELIST
-    }
+    all_report_streams = get_report_stream_names()
 
     if len(all_core_streams & set(selected_streams)):
         # Sync all core objects streams
