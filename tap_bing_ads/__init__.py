@@ -61,6 +61,10 @@ STATE = {}
 # ~2 hour polling timeout
 MAX_NUM_REPORT_POLLS = 1440
 REPORT_POLL_SLEEP = 5
+# A report window Bing fails to build (Status Error, or still pending after the polling timeout)
+# is asked for again this many times, then the run fails rather than looping on it or moving
+# its bookmark past days it never read.
+MAX_REPORT_WINDOW_ATTEMPTS = 3
 
 SESSION = requests.Session()
 DEFAULT_USER_AGENT = 'Singer.io Bing Ads Tap'
@@ -710,20 +714,20 @@ def sync_accounts_stream(account_ids, catalog_item):
         response = client.GetAccount(AccountId=account_id)
         accounts.append(sobject_to_dict(response))
 
-    accounts_bookmark = singer.get_bookmark(STATE, 'accounts', 'last_record')
-    if accounts_bookmark:
-        accounts = list(
-            filter(lambda x: x is not None and x['LastModifiedTime'] >= accounts_bookmark,
-                   accounts))
-
-    max_accounts_last_modified = max([x['LastModifiedTime'] for x in accounts])
+    # Every account, every run: a handful of rows, and filtering on the bookmark left nothing
+    # to take the max of once no account had changed (max() of an empty list failed the run).
+    accounts = [x for x in accounts if x is not None]
+    max_accounts_last_modified = max(
+        [x['LastModifiedTime'] for x in accounts if x.get('LastModifiedTime')],
+        default=singer.get_bookmark(STATE, 'accounts', 'last_record'))
 
     with metrics.record_counter('accounts') as counter:
         # Write only selected fields
         singer.write_records('accounts', filter_selected_fields_many(selected_fields, accounts))
         counter.increment(len(accounts))
 
-    singer.write_bookmark(STATE, 'accounts', 'last_record', max_accounts_last_modified)
+    if max_accounts_last_modified:
+        singer.write_bookmark(STATE, 'accounts', 'last_record', max_accounts_last_modified)
     singer.write_state(STATE)
 
 @bing_ads_error_handling
@@ -885,10 +889,12 @@ async def poll_report(client, account_id, report_name, start_date, end_date, req
                 break
 
             if i == MAX_NUM_REPORT_POLLS:
-                LOGGER.info('Generating report timed out: %s - from %s to %s',
-                            report_name,
-                            start_date,
-                            end_date)
+                LOGGER.warning('Generating report timed out: %s - from %s to %s',
+                               report_name,
+                               start_date,
+                               end_date)
+                # Not "no data": the window was never read, so its bookmark must not move.
+                return False, None
             else:
                 await asyncio.sleep(REPORT_POLL_SLEEP)
 
@@ -964,6 +970,7 @@ async def sync_report(client, account_id, report_stream):
         report_stream.stream, account_id, start_date, end_date)
 
     current_start_date = start_date
+    attempts = 0
     while current_start_date <= end_date:
         current_end_date = min(
             current_start_date.shift(days=report_max_days),
@@ -982,6 +989,12 @@ async def sync_report(client, account_id, report_stream):
 
         if success:
             current_start_date = current_end_date.shift(days=1)
+            attempts = 0
+        else:
+            attempts += 1
+            if attempts >= MAX_REPORT_WINDOW_ATTEMPTS:
+                raise Exception('Bing could not build {} for account {} from {} to {} after {} attempts'.format(
+                    report_stream.stream, account_id, current_start_date.date(), current_end_date.date(), attempts))
 
 async def sync_report_interval(client, account_id, report_stream,
                                start_date, end_date):
