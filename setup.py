@@ -18,6 +18,8 @@ setup(
         'requests==2.31.0',
         'singer-python==6.0.0',
         'backoff==2.2.1',
+        # bingads 13.0.11.1 imports pkg_resources (setuptools 81 drops it); a fresh venv has no setuptools.
+        'setuptools>=70,<81',
     ],
     extras_require={
         'test': [
