@@ -13,6 +13,7 @@ import time
 import socket
 import ssl
 import functools
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import URLError
 import singer
 from singer import utils, metadata, metrics
@@ -68,6 +69,15 @@ MAX_REPORT_WINDOW_ATTEMPTS = 3
 
 SESSION = requests.Session()
 DEFAULT_USER_AGENT = 'Singer.io Bing Ads Tap'
+
+# Report calls (SubmitGenerateReport, PollGenerateReport, the download) are blocking SOAP/HTTP
+# calls. Made on the event loop they ran one at a time across every account and report, so a
+# run spent its time waiting on them in turn (Aria run 7dbc6ff5: 5,300 of 5,600 s). They run on
+# this many threads instead (config max_parallel_requests); each account's SOAP client is used
+# by one thread at a time (run_for_account).
+DEFAULT_MAX_PARALLEL_REQUESTS = 16
+EXECUTOR = None
+ACCOUNT_LOCKS = {}
 
 ARRAY_TYPE_REGEX = r'ArrayOf([A-Za-z0-9]+)'
 
@@ -141,6 +151,26 @@ def get_request_timeout():
     else: # If value is 0, "0" or "" then set default to 300 seconds.
         request_timeout = REQUEST_TIMEOUT
     return request_timeout
+
+def get_executor():
+    global EXECUTOR  # pylint: disable=global-statement
+    if EXECUTOR is None:
+        workers = int(CONFIG.get('max_parallel_requests') or DEFAULT_MAX_PARALLEL_REQUESTS)
+        EXECUTOR = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix='bing')
+    return EXECUTOR
+
+async def run_blocking(fn, *args, **kwargs):
+    """fn(*args, **kwargs) on a worker thread, so the other reports' calls go on meanwhile."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(get_executor(), functools.partial(fn, *args, **kwargs))
+
+async def run_for_account(account_id, fn, *args, **kwargs):
+    """fn on a worker thread, one call per account at a time: the account's report streams
+    share one SOAP client, and a suds client is not safe to use from two threads at once. The
+    wait for the account is on the event loop, so no worker thread is held by it."""
+    lock = ACCOUNT_LOCKS.setdefault(str(account_id), asyncio.Lock())
+    async with lock:
+        return await run_blocking(fn, *args, **kwargs)
 
 class CustomServiceClient(ServiceClient):
     # This class calling the methods of the specified Bing Ads service.
@@ -873,7 +903,7 @@ async def poll_report(client, account_id, report_name, start_date, end_date, req
                 start_date,
                 end_date)
             # As in the async method backoff does not work directly we created a separate method to handle it.
-            response = generate_poll_report(client, request_id)
+            response = await run_for_account(account_id, generate_poll_report, client, request_id)
             if response.Status == 'Error':
                 LOGGER.warn('Error polling %s for account %s with request id %s',
                             report_name, account_id, request_id)
@@ -908,8 +938,8 @@ def log_retry_attempt(details):
                       (requests.exceptions.Timeout ,requests.exceptions.ConnectionError),
                       max_tries=5,
                       on_backoff=log_retry_attempt)
-def stream_report(stream_name, report_name, url, report_time):
-    # Write stream report with backoff of ConnectionError
+def download_report(report_name, url):
+    # Download a report's zip, with backoff of ConnectionError
     with metrics.http_request_timer('download_report'):
         # Set request timeout with config param `request_timeout`.
         request_timeout = get_request_timeout()
@@ -918,7 +948,11 @@ def stream_report(stream_name, report_name, url, report_time):
     if response.status_code != 200:
         raise Exception('Non-200 ({}) response downloading report: {}'.format(
             response.status_code, report_name))
-    with ZipFile(io.BytesIO(response.content)) as zip_file:
+    return response.content
+
+def write_report(stream_name, content, report_time):
+    # Write a downloaded report's rows (on the event loop's thread: one writer of stdout)
+    with ZipFile(io.BytesIO(content)) as zip_file:
         with zip_file.open(zip_file.namelist()[0]) as binary_file:
             with io.TextIOWrapper(binary_file, encoding='utf-8') as csv_file:
                 # handle control character at the start of the file and extra next line
@@ -934,6 +968,10 @@ def stream_report(stream_name, report_name, url, report_time):
                         row['run_id'] = RUN_ID
                         singer.write_record(stream_name, row)
                         counter.increment()
+
+def stream_report(stream_name, report_name, url, report_time):
+    # Write stream report with backoff of ConnectionError
+    write_report(stream_name, download_report(report_name, url), report_time)
 
 def get_report_interval(state_key):
     # Return start_date and end_date for report interval
@@ -1007,9 +1045,10 @@ async def sync_report_interval(client, account_id, report_stream,
     report_time = arrow.get().isoformat()
 
     # Get request id to retrieve report stream
-    request_id = get_report_request_id(client, account_id, report_stream,
-                                       report_name, start_date, end_date,
-                                       state_key)
+    request_id = await run_for_account(account_id, get_report_request_id,
+                                    client, account_id, report_stream,
+                                    report_name, start_date, end_date,
+                                    state_key)
 
     singer.write_bookmark(STATE, state_key, 'request_id', request_id)
     singer.write_state(STATE)
@@ -1023,9 +1062,10 @@ async def sync_report_interval(client, account_id, report_stream,
         LOGGER.info('The request_id %s for %s is invalid, generating a new one',
                     request_id,
                     state_key)
-        request_id = get_report_request_id(client, account_id, report_stream,
-                                           report_name, start_date, end_date,
-                                           state_key, force_refresh=True)
+        request_id = await run_for_account(account_id, get_report_request_id,
+                                        client, account_id, report_stream,
+                                        report_name, start_date, end_date,
+                                        state_key, force_refresh=True)
 
         singer.write_bookmark(STATE, state_key, 'request_id', request_id)
         singer.write_state(STATE)
@@ -1037,10 +1077,8 @@ async def sync_report_interval(client, account_id, report_stream,
         LOGGER.info('Streaming report: %s for account %s - from %s to %s',
                     report_name, account_id, start_date, end_date)
 
-        stream_report(report_stream.stream,
-                      report_name,
-                      download_url,
-                      report_time)
+        content = await run_blocking(download_report, report_name, download_url)
+        write_report(report_stream.stream, content, report_time)
         singer.write_bookmark(STATE, state_key, 'request_id', None)
         singer.write_bookmark(STATE, state_key, 'date', end_date.isoformat())
         singer.write_state(STATE)
